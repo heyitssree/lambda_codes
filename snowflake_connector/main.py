@@ -1,8 +1,6 @@
+
 import logging
 import os
-from functools import wraps
-from datetime import datetime
-
 import json
 import boto3
 import pandas as pd
@@ -12,50 +10,51 @@ from snowflake.connector.pandas_tools import write_pandas
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.backends import default_backend
 
+# Setup logging
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
+# Decorators for logging
 def log_methods_non_sensitive(func):
-    @wraps(func)
     def wrapper(*args, **kwargs):
         logger.info(f"Calling {func.__name__} with args: {args} and kwargs: {kwargs}")
         return func(*args, **kwargs)
     return wrapper
 
 def log_method_sensitive(func):
-    @wraps(func)
     def wrapper(*args, **kwargs):
         logger.info(f"Method: {func.__name__} called.")
         return func(*args, **kwargs)
     return wrapper
 
+# AWS Secrets Manager interaction
 def get_secret(secret_id: str):
-    """Get secret from AWS Secrets Manager."""
     session = boto3.session.Session()
-    
     client = session.client(service_name="secretsmanager", region_name="us-east-1")
-    
-    get_secret_value_response = client.get_secret_value(SecretId=secret_id)
+    try:
+        get_secret_value_response = client.get_secret_value(SecretId=secret_id)
+        secret_json_string = get_secret_value_response["SecretString"]
+        return json.loads(secret_json_string)
+    except Exception as e:
+        logger.error(f"Error getting secret: {e}")
+        raise
 
-    secret_json_string = get_secret_value_response["SecretString"]
-    return json.loads(secret_json_string)
-
+# Cryptography operations
 def get_private_key(snowflake_private_key):
-    p_key = bytes(snowflake_private_key, "utf-8")
-    
-    p_key = serialization.load_pem_private_key(
-        p_key,
-        password=None,
-        backend=default_backend()
-    )
-    return p_key.private_bytes(
-        encoding=serialization.Encoding.DER,
-        format=serialization.PrivateFormat.PKCS8,
-        encryption_algorithm=serialization.NoEncryption()
-    )
-    
+    try:
+        p_key = bytes(snowflake_private_key, "utf-8")
+        p_key = serialization.load_pem_private_key(p_key, password=None, backend=default_backend())
+        return p_key.private_bytes(
+            encoding=serialization.Encoding.DER,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption()
+        )
+    except Exception as e:
+        logger.error(f"Error loading private key: {e}")
+        raise
+
+# Snowflake connection
 def connect_to_snowflake(snowflake_user, snowflake_account, private_key, snowflake_schema, snowflake_warehouse, snowflake_database):
-    """Connect to Snowflake."""
     try:
         connection = connect(
             user=snowflake_user,
@@ -65,12 +64,12 @@ def connect_to_snowflake(snowflake_user, snowflake_account, private_key, snowfla
             warehouse=snowflake_warehouse,
             database=snowflake_database
         )
-        logger.info("Connected to Snowflake.")
         return connection
-    except Exception as error:
-        logger.error(error)
-        raise error
-    
+    except Exception as e:
+        logger.error(f"Error connecting to Snowflake: {e}")
+        raise
+
+# Data processing functions
 def create_dataframe_from_s3(bucket, key):
     try:
         s3 = boto3.client("s3")
@@ -83,7 +82,7 @@ def create_dataframe_from_s3(bucket, key):
         logger.error(error)
         raise error
     
-def  fetch_schema_from_s3(bucket, key):
+def fetch_schema_from_s3(bucket, key):
     try:
         s3 = boto3.client("s3")
         obj = s3.get_object(Bucket=bucket, Key=key)
@@ -92,7 +91,7 @@ def  fetch_schema_from_s3(bucket, key):
     except Exception as error:
         logger.error(error)
         raise error
-    
+
 def validate_df_schema(df, schema):
     try:
         df_types = df.dtypes.apply(lambda x: x.name).to_dict()
@@ -113,8 +112,8 @@ def validate_df_schema(df, schema):
     except Exception as error:
         logger.error(error)
         raise error
-    
-def transform_data(df: pd.Dataframe):
+
+def transform_data(df: pd.DataFrame):
     try:
         df.columns = [col.upper().replace(' (%)', '_PCT').replace(' ($)', '').replace(' ', '_') for col in df.columns]
         df['YYYY'] = pd.to_datetime('today').year
@@ -216,10 +215,9 @@ def lambda_handler(event, context):
             else:
                 logger.info("Schema validation failed.")
                 raise ValueError("Schema validation failed.")
-        except Exception as error:
-            logger.error(error)
-            publish_to_sns(os.environ["SNS_ARN"], "Failure", f"Error loading data to Snowflake table: {snowflake_table}")
-            raise error
+        except Exception as e:
+            logger.error(f"Error in lambda handler: {e}")
+            raise
     else:
         logger.error("No event found.")
         raise ValueError("No event found.")
